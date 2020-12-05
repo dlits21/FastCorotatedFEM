@@ -70,18 +70,19 @@ class FastCorotatedFEM:
                 raise Exception("error with input tetrahedrons. The rest volume is below zero")
             b = np.linalg.inv(d_m)
 
-            # compute init matrix K from Alg. 1:4
+            # compute init matrix K from Alg. 1: 1:4
             self.k[9 * t:9 * t + 9, 9 * t:9 * t + 9] = 2 * mu * v * (dt ** 2) * np.ones(9)
 
-            # compute init mass M from Alg. 1:6
+            # compute init mass M from Alg. 1: 1:6
             for i in tetrahedron.vertex:
                 self.m[3 * i:3 * i + 3, 3 * i:3 * i + 3] += density * v / 4 * np.identity(3)
 
-            # compute matrix D from Eq. 9
+            # compute matrix D_t from Eq. 9
             for i in range(3):
                 d_t[i, 0] = -np.sum(b, axis=0)[i]
             d_t[:, 1:] = b.T
 
+            # computes matrix D from Alg. 1: 10:12
             for i in range(4):
                 for j in range(3):
                     self.d[9 * t + 3 * j:9 * t + 3 * j + 3,
@@ -92,6 +93,7 @@ class FastCorotatedFEM:
         self.L = cholesky(matrix, lower=True)
 
         # TODO remove fixed vertices from calculation
+        # initializes rotation matrix
         self.q = initial_q
         self.instantiated = True
 
@@ -135,6 +137,12 @@ class FastCorotatedFEM:
         self.time += dt
 
     def adp(self, a):
+        """
+        Algorithm 3: Analytic Polar Decomposition
+
+        :param a: input matrix
+        :return: rotational matrix
+        """
         q1 = self.q
         while True:
             r = q1.to_rotation_matrix
@@ -195,10 +203,10 @@ class FastCorotatedFEM:
 
     def compute_gradient(self, matrix):
         """
-        Eq. 24
+        Eq. 24 - computes gradient of rotation matrix
 
-        :param matrix: input matrix
-        :return: gradient of the matrix
+        :param matrix: input rotation matrix
+        :return: gradient of matrix
         """
         axl = np.zeros((3, 1))
         for k in range(3):
@@ -208,14 +216,33 @@ class FastCorotatedFEM:
         return -2 * axl
 
     def compute_hessian(self, matrix):
+        """
+        Eq. 25 - computes hessian matrix
+
+        :param matrix: input rotation matrix
+        :return: hessian matrix
+        """
+
         return np.trace(matrix) * np.identity(3) - (matrix + matrix.T) / 2
 
     def cay(self, omega):
+        ## TODO check!!!
         a = (1 - np.linalg.norm(omega / 2) ** 2) / (1 + np.linalg.norm(omega / 2) ** 2)
         b = omega.T / (1 + np.linalg.norm(omega / 2) ** 2)
         return np.array([a,b]).T
 
-    def clang(self, r, c_min, c_max):
+    def clang(self,
+              r,
+              c_min,
+              c_max):
+        """
+        cuts values below c_min and above c_max
+
+        :param r: input rotation matrix
+        :param c_min: lower bound
+        :param c_max: upper bound
+        :return: clipped/clanged rotation matrix
+        """
         for i in range(3):
             for j in range(3):
                 if r[i, j] < c_min:
@@ -225,6 +252,7 @@ class FastCorotatedFEM:
         return r
 
     def volume_conservation(self):
+        # TODO implement
         pass
 
 
