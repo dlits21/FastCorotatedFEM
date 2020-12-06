@@ -25,10 +25,13 @@ class FastCorotatedFEM:
 
         # set constants
         self.time = 0.0
+        self.la = 0.0
+        self.tau = 0.0
         self.tetrahedrons = None
         self.number_of_tetrahedrons = 0
         self.vertices = None
         self.number_of_vertices = 0
+
 
         # calculated constants
         self.L = None
@@ -40,6 +43,7 @@ class FastCorotatedFEM:
                    vertices,
                    initial_q=quaternionic.array([np.pi, 0, 0, 0]),
                    density=0.1,
+                   la=0.1,
                    mu=0.1,
                    tau=0.1,
                    dt=0.1):
@@ -62,6 +66,7 @@ class FastCorotatedFEM:
         self.vertices = vertices
         self.number_of_tetrahedrons = tetrahedrons.shape[0]
         self.number_of_vertices = vertices.shape[0]
+        self.la = la
         self.tau = tau
 
         # instantiate variables
@@ -112,14 +117,14 @@ class FastCorotatedFEM:
              velocity,
              f_ext,
              dt,
-             solver_iterations):
+             volume_constraint_phases):
         """
         Algorithm 2: Time step
 
         :param velocity:
         :param f_ext:
         :param dt:
-        :param solver_iterations:
+        :param volume_constraint_phases:
         :return:
         """
         assert self.instantiated, 'Please call FastCorotatedFEM.instantiate(...) first'
@@ -127,23 +132,26 @@ class FastCorotatedFEM:
         new_vertices = np.copy(self.vertices)
 
         for i, v in enumerate(self.vertices):
-            new_vertices[i] += velocity[i] * dt + np.divide((f_ext[i] * (dt ** 2)), np.diag(self.m[i:i + 3, i:i + 3]))
+            new_vertices[i] += velocity[i] * dt + np.divide((f_ext[i] * (dt ** 2)), np.diag(self.inv_m[i:i + 3, i:i + 3]))
 
         b = np.ones((9 * self.number_of_tetrahedrons,))
         for t, tetrahedron in enumerate(self.tetrahedrons):
-            f_t = np.dot(self.__get_deformed_shape_matrix(tetrahedron, new_vertices),
-                         np.linalg.inv(self.__get_rest_shape_matrix(tetrahedron)))
+            f_t = self.__get_deformation_gradient(tetrahedron, new_vertices)
+
             r_t = self.__adp(f_t)
             b[9 * t:9 * t + 9] = r_t.flatten() - f_t.flatten()
         b = np.dot(np.dot(self.d.T, self.k), b)
 
         d_x = np.linalg.solve(self.L, b)
+        # TODO update_x
 
         self.kappa_t = np.zeros((self.number_of_tetrahedrons,))
 
-        counter = 0
-        while counter < solver_iterations:
-            self.__volume_conservation()
+        for phase in range(volume_constraint_phases):
+            for t, tetrahedron in enumerate(self.tetrahedrons):
+                self.__volume_conservation(t, tetrahedron, new_vertices)
+
+        # TODO update velocity
 
         self.time += dt
 
@@ -185,20 +193,17 @@ class FastCorotatedFEM:
                 self.q = q1
                 return self.q.to_rotation_matrix
 
-    def __get_rest_shape_matrix(self, tetrahedron):
+    def __get_deformation_gradient(self, tetrahedron, new_vertices):
         """
-        Eq. 6
-        calculates D_m
+        Eq. 4
+        calculates deformation gradient
 
-        :param tetrahedron: instance of tetrahedron
-        :return: D_m as 3x3 matrix
+        :param tetrahedron: tetrahedron: instance of tetrahedron
+        :param new_vertices: array of vertices
+        :return: deformation gradient
         """
-
-        v1 = self.vertices[tetrahedron.vertex[1]] - self.vertices[tetrahedron.vertex[0]]
-        v2 = self.vertices[tetrahedron.vertex[2]] - self.vertices[tetrahedron.vertex[0]]
-        v3 = self.vertices[tetrahedron.vertex[3]] - self.vertices[tetrahedron.vertex[0]]
-
-        return vertices_to_matrix(v1, v2, v3)
+        return np.dot(self.__get_deformed_shape_matrix(tetrahedron, new_vertices),
+               np.linalg.inv(self.__get_rest_shape_matrix(tetrahedron)))
 
     def __get_deformed_shape_matrix(self, tetrahedron, vertex):
         """
@@ -213,6 +218,21 @@ class FastCorotatedFEM:
         v1 = vertex[tetrahedron.vertex[1]] - vertex[tetrahedron.vertex[0]]
         v2 = vertex[tetrahedron.vertex[2]] - vertex[tetrahedron.vertex[0]]
         v3 = vertex[tetrahedron.vertex[3]] - vertex[tetrahedron.vertex[0]]
+
+        return vertices_to_matrix(v1, v2, v3)
+
+    def __get_rest_shape_matrix(self, tetrahedron):
+        """
+        Eq. 6
+        calculates D_m
+
+        :param tetrahedron: instance of tetrahedron
+        :return: D_m as 3x3 matrix
+        """
+
+        v1 = self.vertices[tetrahedron.vertex[1]] - self.vertices[tetrahedron.vertex[0]]
+        v2 = self.vertices[tetrahedron.vertex[2]] - self.vertices[tetrahedron.vertex[0]]
+        v3 = self.vertices[tetrahedron.vertex[3]] - self.vertices[tetrahedron.vertex[0]]
 
         return vertices_to_matrix(v1, v2, v3)
 
@@ -363,11 +383,89 @@ class FastCorotatedFEM:
 
         return quaternionic.array([w[0], b[0][0], b[1][0], b[2][0]])
 
-    def __volume_conservation(self):
-        self.__update_x()
-        self.__udpate_kappa()
+    def __volume_conservation(self, t, tetrahedron, vertex, dt):
+        rest_volume = self.__calculate_rest_volume(tetrahedrons, vertex)
+        compliance_factor = self.__calculate_compliance_factor(tetrahedron, dt)
+        gradients = self.__calculate_gradient_x(tetrahedron, vertex)
 
+        divisor = 1
+        for (x, g) in zip(tetrahedron.vertex, gradients):
+            divisor *= self.inv_m[x, x] * norm(g * rest_volume)
+        divisor += compliance_factor
 
+        # compute delta kappa
+        d_kappa = (rest_volume - compliance_factor * (self.kappa_t[t])) / divisor
+
+        # Eq. 16
+        # update kappa
+        self.kappa += d_kappa
+
+        # update vertices
+        for (x, g) in zip(tetrahedron.vertex, gradients):
+            self.vertices[x] += self.inv_m[x,x] * g * rest_volume * d_kappa
+
+    def __calculate_rest_volume(self, tetrahedron, vertex):
+        """
+        Eq. 14
+        calculates volume constraint
+
+        :param tetrahedron: instance of Tetrahedron
+        :param vertex: array of new vertices
+        :return: volume constraint of tetrahedron
+        """
+        # Alternative
+        # v1 = self.vertices[tetrahedron.vertex[1]] - self.vertices[tetrahedron.vertex[0]]
+        # v2 = self.vertices[tetrahedron.vertex[2]] - self.vertices[tetrahedron.vertex[0]]
+        # v3 = self.vertices[tetrahedron.vertex[3]] - self.vertices[tetrahedron.vertex[0]]
+        #
+        # return np.cross(v1, v2) * v3 / (6 * self.__calculate_volume(tetrahedron)) - 1
+
+        f_t = self.__get_deformation_gradient(tetrahedron, vertex)
+        return np.linalg.det(f_t) - 1
+
+    def __calculate_compliance_factor(self, tetrahedron, dt):
+        """
+        calculates compliance factor
+
+        :param tetrahedron: instance of Tetrahedron
+        :param dt: timestep
+        :return: compliance factor
+        """
+        return self.la * self.__calculate_volume(tetrahedron) * (dt ** 2)
+
+    def __calculate_volume(self, tetrahedron):
+        """
+        calculates volume of Tetrahedron
+        V = det(v1,v2,v3) / 6
+
+        :param tetrahedron: instance of Tetrahedron
+        :return: Volume of Tetrahedron
+        """
+
+        v1 = self.vertices[tetrahedron.vertex[1]] - self.vertices[tetrahedron.vertex[0]]
+        v2 = self.vertices[tetrahedron.vertex[2]] - self.vertices[tetrahedron.vertex[0]]
+        v3 = self.vertices[tetrahedron.vertex[3]] - self.vertices[tetrahedron.vertex[0]]
+
+        return np.linalg.det(vertices_to_matrix(v1, v2, v3)) / 6
+
+    def __calculate_gradient_x(self, tetrahedron, vertex):
+        """
+        calculates the gradients used in Eq. 15
+
+        :param tetrahedron: instance of Tetrahedron
+        :param vertex: array of Vertex
+        :return: g0, g1, g2, g3
+        """
+
+        v1 = vertex[tetrahedron.vertex[1]] - vertex[tetrahedron.vertex[0]]
+        v2 = vertex[tetrahedron.vertex[2]] - vertex[tetrahedron.vertex[0]]
+        v3 = vertex[tetrahedron.vertex[3]] - vertex[tetrahedron.vertex[0]]
+
+        g1 = np.cross(v1, v2)
+        g2 = np.cross(v2, v3)
+        g3 = np.cross(v3, v1)
+
+        return [- g1 - g2 - g3, g1, g2, g3]
 
 if __name__ == '__main__':
     vertices = np.array([Vertex(0, 0, 0), Vertex(1, 0, 0), Vertex(0, 1, 0), Vertex(0, 0, 1)])

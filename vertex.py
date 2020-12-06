@@ -52,6 +52,21 @@ class Vertex:
             z = self.z + other
         return Vertex(x, y, z)
 
+    def __iadd__(self, other):
+        if isinstance(other, np.ndarray):
+            x = self.x + other[0]
+            y = self.y + other[1]
+            z = self.z + other[2]
+        elif isinstance(other, object):
+            x = self.x + other.x
+            y = self.y + other.y
+            z = self.z + other.z
+        else:
+            x = self.x + other
+            y = self.y + other
+            z = self.z + other
+        return Vertex(x, y, z)
+
     def __mul__(self, other):
         if type(other) == 'type':
             x = self.x * other.x
